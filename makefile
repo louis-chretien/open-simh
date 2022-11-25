@@ -751,6 +751,11 @@ ifeq (${WIN32},)  #*nix Environments (&& cygwin)
     endif
     ifeq (cygwin,$(OSTYPE))
       LIBEXT = $(LIBEXTSAVE)
+      LIBPATH += /usr/lib/w32api
+      ifneq (,$(call find_lib,winmm))
+        OS_CCDEFS += -DHAVE_WINMM
+        OS_LDFLAGS += -lwinmm
+      endif
     endif
     ifeq (,$(findstring HAVE_LIBSDL,$(VIDEO_CCDEFS)))
       $(info *** Info ***)
@@ -1839,6 +1844,7 @@ ALTAIR_OPT = -I ${ALTAIRD}
 
 ALTAIRZ80D = ${SIMHD}/AltairZ80
 ALTAIRZ80 = ${ALTAIRZ80D}/altairz80_cpu.c ${ALTAIRZ80D}/altairz80_cpu_nommu.c \
+	${ALTAIRZ80D}/mmd.c \
 	${ALTAIRZ80D}/s100_dj2d.c \
 	${ALTAIRZ80D}/s100_djhdc.c \
 	${ALTAIRZ80D}/altairz80_dsk.c ${ALTAIRZ80D}/disasm.c \
