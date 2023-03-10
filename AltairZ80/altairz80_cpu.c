@@ -44,6 +44,9 @@
 
 #define INST_MAX_BYTES  4                       /* instruction max bytes */
 
+#define IFF1    1                               /* Interrupt flip-flop 1 */
+#define IFF2    2                               /* Interrupt flip-flop 2 */
+
 #define FLAG_C  1
 #define FLAG_N  2
 #define FLAG_P  4
@@ -174,6 +177,7 @@ static t_stat cpu_ex(t_value *vptr, t_addr addr, UNIT *uptr, int32 sw);
 static t_stat cpu_dep(t_value val, t_addr addr, UNIT *uptr, int32 sw);
 static t_stat cpu_reset(DEVICE *dptr);
 static t_bool cpu_is_pc_a_subroutine_call (t_addr **ret_addrs);
+static t_stat cpu_hex_load(FILE *fileref, CONST char *cptr, CONST char *fnam, int flag);
 static t_stat sim_instr_mmu(void);
 static uint32 GetBYTE(register uint32 Addr);
 static void PutWORD(register uint32 Addr, const register uint32 Value);
@@ -248,6 +252,7 @@ UNIT cpu_unit = {
         int32 IP_S;                                 /* IP register (8086)                           */
         int32 FLAGS_S;                              /* flags register (8086)                        */
         int32 SR                = 0;                /* switch register                              */
+        uint32 nmiInterrupt     = 0;                /* Non-maskable Interrupt                       */
         uint32 vectorInterrupt  = 0;                /* VI0-7 Vector Interrupt bitfield              */
         uint8 dataBus[MAX_INT_VECTORS];             /* Vector Interrupt data bus value              */
 static  int32 bankSelect        = 0;                /* determines selected memory bank              */
@@ -483,7 +488,7 @@ REG cpu_reg[] = {
     }, /* 82 */
     { HRDATAD(COMMONLOW,common_low,         1, "If set, use low memory for common area"),
     }, /* 83 */
-    { HRDATAD(VECINT,vectorInterrupt,       2, "Vector Interrupt pseudo register"),
+    { HRDATAD(VECINT,vectorInterrupt,       8, "Vector Interrupt pseudo register"),
     }, /* 84 */
     { BRDATAD (DATABUS, dataBus, 16, 8,     MAX_INT_VECTORS, "Data bus pseudo register"),
         REG_RO + REG_CIRC   }, /* 85 */
@@ -493,6 +498,8 @@ REG cpu_reg[] = {
     }, /* 87 */
     { DRDATAD(M68KVAR,   m68kvariant,       17, "M68K Type (68000, 68010, etc.)"),
     }, /* 88 */
+    { HRDATAD(NMI,       nmiInterrupt,       1, "NMI Interrupt pseudo register"),
+    }, /* 89 */
     { NULL }
 };
 
@@ -2191,7 +2198,7 @@ static t_stat sim_instr_mmu (void) {
     SP = SP_S;
     IX = IX_S;
     IY = IY_S;
-    specialProcessing = clockFrequency | timerInterrupt | vectorInterrupt | keyboardInterrupt | sim_brk_summ;
+    specialProcessing = clockFrequency | nmiInterrupt | timerInterrupt | vectorInterrupt | keyboardInterrupt | sim_brk_summ;
     tStates = 0;
     if (rtc_avail) {
         startTime = sim_os_msec();
@@ -2213,7 +2220,7 @@ static t_stat sim_instr_mmu (void) {
                 } else /* make sure that sim_os_msec() is not called later */
                     clockFrequency = startTime = tStatesInSlice = 0;
             }
-            specialProcessing = clockFrequency | timerInterrupt | vectorInterrupt | keyboardInterrupt | sim_brk_summ;
+            specialProcessing = clockFrequency | nmiInterrupt | timerInterrupt | vectorInterrupt | keyboardInterrupt | sim_brk_summ;
         }
 
         if (specialProcessing) { /* quick check for special processing */
@@ -2227,11 +2234,28 @@ static t_stat sim_instr_mmu (void) {
                     sim_os_ms_sleep(startTime - now);
             }
 
-            if (timerInterrupt && (IFF_S & 1)) {
+            if (nmiInterrupt) {
+                nmiInterrupt = FALSE;
+                specialProcessing = clockFrequency | sim_brk_summ;
+                IFF_S &= IFF2; /* Clear IFF1 */
+                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (nmiInterrupt = TRUE, IFF_S |= IFF1));
+                if ((GetBYTE(PC) == HALTINSTRUCTION) && ((cpu_unit.flags & UNIT_CPU_STOPONHALT) == 0)) {
+                    PUSH(PC + 1);
+                    PCQ_ENTRY(PC);
+                }
+                else {
+                    PUSH(PC);
+                    PCQ_ENTRY(PC - 1);
+                }
+                tStates += 11;
+                PC = 0x0066;
+            }
+
+            if (timerInterrupt && (IFF_S & IFF1)) {
                 timerInterrupt = FALSE;
                 specialProcessing = clockFrequency | sim_brk_summ;
                 IFF_S = 0; /* disable interrupts */
-                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (timerInterrupt = TRUE, IFF_S |= 1));
+                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (timerInterrupt = TRUE, IFF_S |= (IFF1 | IFF2)));
                 if ((GetBYTE(PC) == HALTINSTRUCTION) && ((cpu_unit.flags & UNIT_CPU_STOPONHALT) == 0)) {
                     PUSH(PC + 1);
                     PCQ_ENTRY(PC);
@@ -2242,7 +2266,7 @@ static t_stat sim_instr_mmu (void) {
                 PC = timerInterruptHandler & ADDRMASK;
             }
 
-            if ((IM_S == 1) && vectorInterrupt && (IFF_S & 1)) {    /* Z80 Interrupt Mode 1 */
+            if ((IM_S == 1) && vectorInterrupt && (IFF_S & IFF1)) {    /* Z80 Interrupt Mode 1 */
                 uint32 tempVectorInterrupt = vectorInterrupt;
                 uint8 intVector = 0;
 
@@ -2255,7 +2279,7 @@ static t_stat sim_instr_mmu (void) {
 
                 specialProcessing = clockFrequency | sim_brk_summ;
                 IFF_S = 0; /* disable interrupts */
-                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (vectorInterrupt |= (1 << intVector), IFF_S |= 1));
+                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (vectorInterrupt |= (1 << intVector), IFF_S |= (IFF1 | IFF2)));
                 if ((GetBYTE(PC) == HALTINSTRUCTION) && ((cpu_unit.flags & UNIT_CPU_STOPONHALT) == 0)) {
                     PUSH(PC + 1);
                     PCQ_ENTRY(PC);
@@ -2269,7 +2293,7 @@ static t_stat sim_instr_mmu (void) {
 
                 sim_debug(INT_MSG, &cpu_dev, ADDRESS_FORMAT
                     " INT(mode=1 intVector=%d PC=%04X)\n", PCX, intVector, PC);
-            } else if ((IM_S == 2) && vectorInterrupt && (IFF_S & 1)) {
+            } else if ((IM_S == 2) && vectorInterrupt && (IFF_S & IFF1)) {
                 int32 vector;
                 uint32 tempVectorInterrupt = vectorInterrupt;
                 uint8 intVector = 0;
@@ -2283,7 +2307,7 @@ static t_stat sim_instr_mmu (void) {
 
                 specialProcessing = clockFrequency | sim_brk_summ;
                 IFF_S = 0; /* disable interrupts */
-                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (vectorInterrupt |= (1 << intVector), IFF_S |= 1));
+                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (vectorInterrupt |= (1 << intVector), IFF_S |= (IFF1 | IFF2)));
                 if ((GetBYTE(PC) == HALTINSTRUCTION) && ((cpu_unit.flags & UNIT_CPU_STOPONHALT) == 0)) {
                     PUSH(PC + 1);
                     PCQ_ENTRY(PC);
@@ -2300,11 +2324,11 @@ static t_stat sim_instr_mmu (void) {
                     " INT(mode=2 intVector=%d vector=%04X PC=%04X)\n", PCX, intVector, vector, PC);
             }
 
-            if (keyboardInterrupt && (IFF_S & 1)) {
+            if (keyboardInterrupt && (IFF_S & IFF1)) {
                 keyboardInterrupt = FALSE;
                 specialProcessing = clockFrequency | sim_brk_summ;
                 IFF_S = 0; /* disable interrupts */
-                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (keyboardInterrupt = TRUE, IFF_S |= 1));
+                CHECK_BREAK_TWO_BYTES_EXTENDED(SP - 2, SP - 1, (keyboardInterrupt = TRUE, IFF_S |= (IFF1 | IFF2)));
                 if ((GetBYTE(PC) == HALTINSTRUCTION) && ((cpu_unit.flags & UNIT_CPU_STOPONHALT) == 0)) {
                     PUSH(PC + 1);
                     PCQ_ENTRY(PC);
@@ -2337,7 +2361,7 @@ static t_stat sim_instr_mmu (void) {
            Instruction to execute (ex. RST0-7) is on the data bus
            NOTE: does not support multi-byte instructions such as CALL
         */
-        if ((IM_S == 0) && vectorInterrupt && (IFF_S & 1)) {    /* 8080/Z80 Interrupt Mode 0 */
+        if ((IM_S == 0) && vectorInterrupt && (IFF_S & IFF1)) {    /* 8080/Z80 Interrupt Mode 0 */
             uint32 tempVectorInterrupt = vectorInterrupt;
             uint8 intVector = 0;
 
@@ -5019,7 +5043,7 @@ static t_stat sim_instr_mmu (void) {
 
                     case 0x57:      /* LD A,I */
                         tStates += 9;
-                        AF = (AF & 0x29) | (IR_S & ~0xff) | ((IR_S >> 8) & 0x80) | (((IR_S & ~0xff) == 0) << 6) | ((IFF_S & 2) << 1);
+                        AF = (AF & 0x29) | (IR_S & ~0xff) | ((IR_S >> 8) & 0x80) | (((IR_S & ~0xff) == 0) << 6) | ((IFF_S & IFF2) << 1);
                         break;
 
                     case 0x58:      /* IN E,(C) */
@@ -5060,7 +5084,7 @@ static t_stat sim_instr_mmu (void) {
                     case 0x5f:      /* LD A,R */
                         tStates += 9;
                         AF = (AF & 0x29) | ((IR_S & 0xff) << 8) | (IR_S & 0x80) |
-                            (((IR_S & 0xff) == 0) << 6) | ((IFF_S & 2) << 1);
+                            (((IR_S & 0xff) == 0) << 6) | ((IFF_S & IFF2) << 1);
                         break;
 
                     case 0x60:      /* IN H,(C) */
@@ -5552,7 +5576,7 @@ static t_stat sim_instr_mmu (void) {
 
             case 0xfb:          /* EI */
                 tStates += 4;   /* EI 4 */
-                IFF_S = 3;
+                IFF_S = (IFF1 | IFF2);
                 break;
 
             case 0xfc:              /* CALL M,nnnn */
@@ -7244,6 +7268,8 @@ t_stat sim_load(FILE *fileref, CONST char *cptr, CONST char *fnam, int flag) {
     char gbuf[CBUFSIZE];
     if (chiptype == CHIP_TYPE_M68K)
         return sim_load_m68k(fileref, cptr, fnam, flag);
+    if (sim_switches & SWMASK ('H'))
+        return cpu_hex_load(fileref, cptr, fnam, flag);
     if (flag) {
         result = get_range(NULL, cptr, &lo, &hi, 16, ADDRMASKEXTENDED, 0);
         if (result == NULL)
@@ -7298,6 +7324,68 @@ t_stat sim_load(FILE *fileref, CONST char *cptr, CONST char *fnam, int flag) {
             sim_printf("Warning: %d page%s modified.\n", PLURAL(pagesModified));
     }
     return SCPE_OK;
+}
+
+/* cpu_hex_load will load an Intel hex file into RAM.
+   Based on HEX2BIN by Mike Douglas
+   https://deramp.com/downloads/misc_software/hex-binary utilities for the PC/
+*/
+static t_stat cpu_hex_load(FILE *fileref, CONST char *cptr, CONST char *fnam, int flag) {
+    char linebuf[1024], datastr[1024], *bufptr;
+    int32 bytecnt, rectype, databyte, chksum, line = 0, cnt = 0;
+    t_addr addr, org = 0;
+
+    while (!feof(fileref)) {
+        if (fgets(linebuf, sizeof(linebuf), fileref) == NULL)
+            break;
+
+        line++;
+
+        /* Strip EOL characters */
+        if ((bufptr = strchr(linebuf, '\r')) != NULL) {
+            *bufptr = '\0';
+        }
+        if ((bufptr = strchr(linebuf, '\n')) != NULL) {
+            *bufptr = '\0';
+        }
+
+        if (strlen(linebuf) == 0)
+            continue;
+
+        if (sscanf(linebuf, ":%2x%4x%2x%s", &bytecnt, &addr, &rectype, datastr) != 4) {
+            return sim_messagef(SCPE_IERR, "Hex file format error at line %d\n", line);
+        }
+        chksum = bytecnt + (addr >> 8) + (addr & 0xff) + rectype;
+
+        bufptr = datastr;
+
+        if ((rectype == 0) && (bytecnt > 0) && (addr+bytecnt <= MAXMEMORY)) {
+            if (cnt == 0)
+                org = addr;
+
+            do {
+                if (sscanf(bufptr, "%2x", &databyte) != 1) {
+                    return sim_messagef(SCPE_IERR, "Hex file format error at line %d\n", line);
+                }
+                bufptr += 2;
+
+                PutBYTE(addr++, databyte);
+
+                chksum += databyte;
+                cnt++;
+            } while (--bytecnt != 0);
+
+            if (sscanf(bufptr, "%2x", &databyte) != 1) {            /* checksum byte */
+                return sim_messagef(SCPE_IERR, "Hex file format error at line %d\n", line);
+            }
+
+            if (0 != ((chksum+databyte) & 0xff)) {
+                return sim_messagef(SCPE_IERR, "Checksum error at line %d\n   %s\n", line, linebuf);
+            }
+        }
+    }
+
+    return sim_messagef(SCPE_OK, "%d byte%s loaded at %x.\n", PLURAL(cnt), org);
 }
 
 void cpu_raise_interrupt(uint32 irq) {

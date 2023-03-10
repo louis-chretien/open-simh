@@ -1,6 +1,6 @@
 /*************************************************************************
  *                                                                       *
- * Copyright (c) 2007-2022 Howard M. Harte.                              *
+ * Copyright (c) 2007-2023 Howard M. Harte.                              *
  * https://github.com/hharte                                             *
  *                                                                       *
  * Permission is hereby granted, free of charge, to any person obtaining *
@@ -55,7 +55,7 @@
 #define UART_MSG    (1 << 6)
 #define VERBOSE_MSG (1 << 7)
 
-#define ADCS6_MAX_UNITS    8
+#define ADCS6_MAX_UNITS     8
 #define ADCS6_ROM_SIZE      (2 * 1024)
 #define ADCS6_ADDR_MASK     (ADCS6_ROM_SIZE - 1)
 
@@ -209,22 +209,21 @@ static ADCS6_INFO* adcs6_info = &adcs6_info_data;
 static uint8 adcs6ram[ADCS6_ROM_SIZE];
 
 #define ADCS6_WAIT  16
-#define ADCS6_UDATA(act,fl,wait,u4,name) NULL,act,NULL,NULL,NULL,NULL,0,0,(fl),0,(0),0,NULL,0,0,wait,0,u4,0,0,NULL,NULL,0,0,0,NULL,0,0,NULL,0,name
 
 static UNIT adcs6_unit[] = {
     { UDATA (&adcs6_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, ADCS6_CAPACITY), 1024 },
     { UDATA (&adcs6_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, ADCS6_CAPACITY) },
     { UDATA (&adcs6_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, ADCS6_CAPACITY) },
     { UDATA (&adcs6_svc, UNIT_FIX + UNIT_ATTABLE + UNIT_DISABLE + UNIT_ROABLE, ADCS6_CAPACITY) },
-    { ADCS6_UDATA(&adcs6_ctc_svc,   UNIT_DISABLE,                ADCS6_WAIT, 4, "ADCS6_CTC0") },  /* CTC0 */
-    { ADCS6_UDATA(&adcs6_ctc_svc,   UNIT_DISABLE,                ADCS6_WAIT, 5, "ADCS6_CTC1") },  /* CTC1 */
-    { ADCS6_UDATA(&adcs6_ctc_svc,   UNIT_DISABLE,                ADCS6_WAIT, 6, "ADCS6_CTC2") },  /* CTC2 */
-    { ADCS6_UDATA(&adcs6_ctc_svc,   UNIT_DISABLE,                ADCS6_WAIT, 7, "ADCS6_CTC3") },  /* CTC3 */
+    { UDATA (&adcs6_ctc_svc, UNIT_DISABLE, 0), ADCS6_WAIT },  /* CTC0 */
+    { UDATA (&adcs6_ctc_svc, UNIT_DISABLE, 0), ADCS6_WAIT },  /* CTC1 */
+    { UDATA (&adcs6_ctc_svc, UNIT_DISABLE, 0), ADCS6_WAIT },  /* CTC2 */
+    { UDATA (&adcs6_ctc_svc, UNIT_DISABLE, 0), ADCS6_WAIT },  /* CTC3 */
 };
 
 static REG adcs6_reg[] = {
     { HRDATAD (EXTADR,      adcs6_info_data.s100_addr_u,    8, "S-100 A23:16"), },
-    { HRDATAD (J7,          adcs6_info_data.j7,      8, "Jumper Block J7 on the ADC Super 6"), },
+    { HRDATAD (J7,          adcs6_info_data.j7,             8, "Jumper Block J7 on the ADC Super 6"), },
     { HRDATAD (MCTRL0,      adcs6_info_data.mctrl0,         8, "MCTRL0 Register"),          },
     { FLDATAD (BANK0EN,     adcs6_info_data.mctrl0,         0, "Memory Bank 0 Enable"),     },
     { FLDATAD (BANK1EN,     adcs6_info_data.mctrl0,         1, "Memory Bank 1 Enable"),     },
@@ -640,6 +639,15 @@ static t_stat adcs6_reset(DEVICE *dptr)
     PNP_INFO *pnp = (PNP_INFO *)dptr->ctxt;
     int i;
 
+    for (i = 0; i < ADCS6_MAX_UNITS; i++) {
+        adcs6_unit[i].u4 = i;
+    }
+
+    sim_set_uname(&adcs6_unit[4], "ADCS6_CTC0");
+    sim_set_uname(&adcs6_unit[5], "ADCS6_CTC1");
+    sim_set_uname(&adcs6_unit[6], "ADCS6_CTC2");
+    sim_set_uname(&adcs6_unit[7], "ADCS6_CTC3");
+
     if(dptr->flags & DEV_DIS) { /* Disconnect ROM and I/O Ports */
         if (adcs6_info->rom_disabled == FALSE) {
             sim_map_resource(pnp->mem_base, pnp->mem_size, RESOURCE_TYPE_MEMORY, &adcs6rom, "adcs6rom", TRUE);
@@ -700,10 +708,6 @@ static t_stat adcs6_reset(DEVICE *dptr)
         if (sim_map_resource(CCS2719, 16, RESOURCE_TYPE_IO, &ccs2719, "ccs2719", FALSE) != 0) {
             sim_printf("%s: error mapping I/O resource at 0x%04x\n", __FUNCTION__, pnp->io_base);
             return SCPE_ARG;
-        }
-
-        for (i = 0; i < ADCS6_MAX_UNITS; i++) {
-            adcs6_unit[i].u4 = i;
         }
 
         /* Reset memory control registers */
